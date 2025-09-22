@@ -78,7 +78,60 @@ $py = Get-Command py -ErrorAction SilentlyContinue
 if (-not $py) {
     Write-Warning "Python launcher 'py' not found. The GitHub runner usually has multiple Pythons preinstalled."
 }
-# If you need numpy later, you could do: py -3.9 -m pip install --user numpy
+
+# ------------------------------------------------------------------------------------
+# PY310 support: Resolve Python 3.10 include/lib/exe and prep CMake args
+# (Does NOT enable Python wrapping; only makes python310.lib discoverable.)
+# ------------------------------------------------------------------------------------
+$cmakePythonArgs = @()
+$PY_OK = $false
+
+try {
+    # Prefer the launcher to target 3.10 explicitly
+    $pyExe = (Get-Command "py" -ErrorAction SilentlyContinue)
+    if ($pyExe) {
+        $py310Path = & py -3.10 -c "import sys; print(sys.executable)" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $py310Path) {
+            $PY_OK = $true
+            $py310Include = & py -3.10 -c "import sysconfig; print(sysconfig.get_paths()['include'])"
+            $py310LibDir  = & py -3.10 -c "import sysconfig; import os; print(sysconfig.get_config_var('LIBDIR') or os.path.join(sys.base_prefix,'libs'))"
+            $py310LibName = & py -3.10 -c "import sysconfig; print(sysconfig.get_config_var('LIBRARY') or 'python310.lib')"
+            if (-not $py310LibName) { $py310LibName = "python310.lib" }
+
+            $py310Lib = Join-Path $py310LibDir $py310LibName
+            if (-not (Test-Path $py310Lib)) {
+                # Fallback: common Windows layout e.g. C:\hostedtoolcache\windows\Python\3.10.x\x64\libs\python310.lib
+                $candidate = Join-Path (Join-Path (Split-Path -Parent $py310Path) "libs") "python310.lib"
+                if (Test-Path $candidate) { $py310Lib = $candidate }
+            }
+
+            if (-not (Test-Path $py310Lib)) {
+                Write-Warning "Could not find python310.lib; continuing without explicit PY lib args."
+            } else {
+                $cmakePythonArgs += @(
+                    "-DPython3_EXECUTABLE=$py310Path",
+                    "-DPython3_INCLUDE_DIR=$py310Include",
+                    "-DPython3_LIBRARY=$py310Lib",
+                    # Some projects still read legacy names:
+                    "-DPYTHON_EXECUTABLE=$py310Path",
+                    "-DPYTHON_INCLUDE_DIR=$py310Include",
+                    "-DPYTHON_LIBRARY=$py310Lib"
+                )
+
+                # Also hint the MSVC environment in case anything uses LIB/INCLUDE scanning
+                $env:INCLUDE = ($env:INCLUDE, $py310Include) -join ";"
+                $env:LIB     = ($env:LIB, (Split-Path -Parent $py310Lib)) -join ";"
+
+                Write-Output "Python 3.10 detected:"
+                Write-Output "  EXE : $py310Path"
+                Write-Output "  INC : $py310Include"
+                Write-Output "  LIB : $py310Lib"
+            }
+        }
+    }
+} catch {
+    Write-Warning "Python 3.10 discovery failed: $($_.Exception.Message)"
+}
 
 # ------------------------------------------------------------------------------------
 # Create workspace
@@ -113,7 +166,8 @@ cmake "$OPENSIM_ROOT\src\opensim-core\dependencies" `
     @generatorArgs `
     -DCMAKE_INSTALL_PREFIX="$DEPENDENCIES_INSTALL_DIR" `
     -DSUPERBUILD_ezc3d:BOOL=on `
-    -DOPENSIM_WITH_CASADI:BOOL=$MOCO
+    -DOPENSIM_WITH_CASADI:BOOL=$MOCO `
+    @cmakePythonArgs
 
 cmake . -LAH
 cmake --build . --config $DEBUG_TYPE -- /maxcpucount:$NUM_JOBS /p:CL_MPCount=1
@@ -143,10 +197,31 @@ cmake "$OPENSIM_ROOT\src\opensim-core" `
     -DBUILD_TESTING=OFF `
     -DOPENSIM_C3D_PARSER=ezc3d `
     -DOPENSIM_WITH_CASADI:BOOL=$MOCO `
-    -DOPENSIM_INSTALL_UNIX_FHS=OFF
+    -DOPENSIM_INSTALL_UNIX_FHS=OFF `
+    @cmakePythonArgs
 
 cmake . -LAH
 cmake --build . --config $DEBUG_TYPE -- /maxcpucount:$NUM_JOBS /p:CL_MPCount=1
 cmake --install .
+
+# ------------------------------------------------------------------------------------
+# PY310 support: copy python310.lib into install lib (optional convenience)
+# ------------------------------------------------------------------------------------
+try {
+    if ($PY_OK) {
+        $pyLibDir = & py -3.10 -c "import sys, sysconfig, os; print(sysconfig.get_config_var('LIBDIR') or os.path.join(sys.base_prefix,'libs'))"
+        $pyLib = Join-Path $pyLibDir "python310.lib"
+        $dest = Join-Path $OPENSIM_INSTALL_DIR "lib"
+        if (Test-Path $pyLib) {
+            if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+            Copy-Item -LiteralPath $pyLib -Destination $dest -Force
+            Write-Output "Copied python310.lib to $dest"
+        } else {
+            Write-Warning "python310.lib not found for post-install copy."
+        }
+    }
+} catch {
+    Write-Warning "Post-install python310.lib copy failed: $($_.Exception.Message)"
+}
 
 Write-Output "OpenSim setup complete. Libraries installed in: $OPENSIM_INSTALL_DIR"
