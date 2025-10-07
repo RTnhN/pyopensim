@@ -145,6 +145,93 @@ endif()
 
 message(STATUS "Found NumPy include directory: ${Python3_NumPy_INCLUDE_DIRS}")
 
+# Prepare Python library/link targets. Windows builds in particular require explicit
+# library paths or imported targets for the interpreter when building extension
+# modules, so resolve those ahead of time.
+set(Python3_LINK_ITEMS "")
+if(Python3_Development_FOUND)
+    if(TARGET Python3::Module)
+        list(APPEND Python3_LINK_ITEMS Python3::Module)
+    elseif(TARGET Python3::Python)
+        list(APPEND Python3_LINK_ITEMS Python3::Python)
+    endif()
+endif()
+
+if(Python3_LINK_ITEMS)
+    list(REMOVE_DUPLICATES Python3_LINK_ITEMS)
+else()
+    set(_python_lib_search_dirs "")
+
+    if(Python3_LIBRARY_DIRS)
+        list(APPEND _python_lib_search_dirs ${Python3_LIBRARY_DIRS})
+    endif()
+
+    if(Python3_EXECUTABLE)
+        execute_process(
+            COMMAND "${Python3_EXECUTABLE}" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR') or '')"
+            OUTPUT_VARIABLE _python_sysconfig_libdir
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+        execute_process(
+            COMMAND "${Python3_EXECUTABLE}" -c "import sysconfig; print(sysconfig.get_config_var('LIBRARY') or sysconfig.get_config_var('LDLIBRARY') or '')"
+            OUTPUT_VARIABLE _python_sysconfig_libname
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+        if(_python_sysconfig_libdir)
+            list(APPEND _python_lib_search_dirs "${_python_sysconfig_libdir}")
+        endif()
+    endif()
+
+    if(_python_lib_search_dirs)
+        list(REMOVE_DUPLICATES _python_lib_search_dirs)
+    endif()
+
+    set(_resolved_python_libs "")
+
+    if(Python3_LIBRARIES)
+        foreach(_entry IN LISTS Python3_LIBRARIES)
+            if(_entry STREQUAL "optimized" OR _entry STREQUAL "debug" OR _entry STREQUAL "general")
+                list(APPEND _resolved_python_libs "${_entry}")
+            elseif(IS_ABSOLUTE "${_entry}" AND EXISTS "${_entry}")
+                list(APPEND _resolved_python_libs "${_entry}")
+            else()
+                set(_resolved_entry "")
+                foreach(_lib_dir IN LISTS _python_lib_search_dirs)
+                    if(_lib_dir AND EXISTS "${_lib_dir}/${_entry}")
+                        set(_resolved_entry "${_lib_dir}/${_entry}")
+                        break()
+                    endif()
+                endforeach()
+                if(_resolved_entry)
+                    list(APPEND _resolved_python_libs "${_resolved_entry}")
+                elseif(WIN32 AND _entry MATCHES "^python[0-9]+(d)?\\.[Ll][Ii][Bb]$")
+                    if(_python_sysconfig_libdir AND EXISTS "${_python_sysconfig_libdir}/${_entry}")
+                        list(APPEND _resolved_python_libs "${_python_sysconfig_libdir}/${_entry}")
+                    else()
+                        list(APPEND _resolved_python_libs "${_entry}")
+                    endif()
+                else()
+                    list(APPEND _resolved_python_libs "${_entry}")
+                endif()
+            endif()
+        endforeach()
+    elseif(_python_sysconfig_libdir AND _python_sysconfig_libname)
+        set(_candidate "${_python_sysconfig_libdir}/${_python_sysconfig_libname}")
+        if(EXISTS "${_candidate}")
+            list(APPEND _resolved_python_libs "${_candidate}")
+        endif()
+    endif()
+
+    if(_resolved_python_libs)
+        set(Python3_LINK_ITEMS ${_resolved_python_libs})
+    endif()
+endif()
+
+unset(_python_lib_search_dirs)
+unset(_python_sysconfig_libdir)
+unset(_python_sysconfig_libname)
+unset(_resolved_python_libs)
+unset(_resolved_entry)
+unset(_candidate)
+
 # Windows-specific compiler flags
 if(WIN32 AND MSVC)
     # Add UTF-8 support flag to fix Unicode compilation issues
@@ -361,6 +448,13 @@ if(EXISTS "${OPENSIM_INSTALL_DIR}/sdk/lib/libezc3d${LIB_EXT}")
     set(SWIG_FLAGS "-DWITH_EZC3D")
 endif()
 
+set(SWIG_WARNING_FLAGS "-w302 -w317 -w327 -w476 -w509 -w560 -w561 -w562 -w566")
+if(SWIG_FLAGS)
+    string(APPEND SWIG_FLAGS " ${SWIG_WARNING_FLAGS}")
+else()
+    set(SWIG_FLAGS "${SWIG_WARNING_FLAGS}")
+endif()
+
 # Function to add SWIG Python modules
 macro(OpenSimAddPythonModule)
     # Parse arguments.
@@ -444,8 +538,10 @@ macro(OpenSimAddPythonModule)
     if("${PYTHON_LDSHARED}" MATCHES "dynamic_lookup")
         set_target_properties(${_libname} PROPERTIES LINK_FLAGS
             "-undefined dynamic_lookup")
+    elseif(Python3_LINK_ITEMS)
+        target_link_libraries(${_libname} PRIVATE ${Python3_LINK_ITEMS})
     elseif(Python3_LIBRARIES)
-        target_link_libraries(${_libname} ${Python3_LIBRARIES})
+        target_link_libraries(${_libname} PRIVATE ${Python3_LIBRARIES})
     else()
         # No Python libraries found, but this is often OK for SWIG bindings
         # in containerized environments where Python symbols are resolved at runtime
