@@ -443,17 +443,15 @@ if(PYOSIM_SWIG_DOXYGEN)
 endif()
 
 # Set SWIG options
-set(SWIG_FLAGS "")
+set(SWIG_FLAGS)
 if(EXISTS "${OPENSIM_INSTALL_DIR}/sdk/lib/libezc3d${LIB_EXT}")
-    set(SWIG_FLAGS "-DWITH_EZC3D")
+    list(APPEND SWIG_FLAGS "-DWITH_EZC3D")
 endif()
 
-set(SWIG_WARNING_FLAGS "-w302 -w317 -w327 -w476 -w509 -w560 -w561 -w562 -w566")
-if(SWIG_FLAGS)
-    string(APPEND SWIG_FLAGS " ${SWIG_WARNING_FLAGS}")
-else()
-    set(SWIG_FLAGS "${SWIG_WARNING_FLAGS}")
-endif()
+set(SWIG_WARNING_FLAGS
+    "-w302" "-w317" "-w327" "-w476" "-w509" "-w560" "-w561" "-w562" "-w566")
+list(APPEND SWIG_FLAGS ${SWIG_WARNING_FLAGS})
+unset(SWIG_WARNING_FLAGS)
 
 # Function to add SWIG Python modules
 macro(OpenSimAddPythonModule)
@@ -539,9 +537,9 @@ macro(OpenSimAddPythonModule)
         set_target_properties(${_libname} PROPERTIES LINK_FLAGS
             "-undefined dynamic_lookup")
     elseif(Python3_LINK_ITEMS)
-        target_link_libraries(${_libname} PRIVATE ${Python3_LINK_ITEMS})
+        target_link_libraries(${_libname} ${Python3_LINK_ITEMS})
     elseif(Python3_LIBRARIES)
-        target_link_libraries(${_libname} PRIVATE ${Python3_LIBRARIES})
+        target_link_libraries(${_libname} ${Python3_LIBRARIES})
     else()
         # No Python libraries found, but this is often OK for SWIG bindings
         # in containerized environments where Python symbols are resolved at runtime
